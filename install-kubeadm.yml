@@ -1,0 +1,146 @@
+- name: kubeadm, kubelet, kubectl install
+  hosts: cp1
+
+  tasks:
+    - name: load kernel modules
+      become: true
+      modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Enable bridged IPv4/IPv6 and IP forwarding
+      become: true
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        reload: yes
+      loop:
+        - { name: net.bridge.bridge-nf-call-iptables, value: 1 }
+        - { name: net.bridge.bridge-nf-call-ip6tables, value: 1 }
+        - { name: net.ipv4.ip_forward, value: 1 }
+      
+    - name: Disable swap
+      become: true
+      command: swapoff -a
+      when: ansible_swaptotal_mb > 0
+
+    - name: Comment out swap entry in /etc/fstab
+      become: true
+      replace:
+        path: /etc/fstab
+        regexp: '^(/swap\.img.*)'
+        replace: '# \1'
+        
+    - name: Create /etc/apt/keyrings directory if it doesn't exist
+      become: true
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+        
+    - name: Install required packages
+      become: true
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+
+    - name: Install Kubernetes GPG key
+      become: true
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key \
+          | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Configure Kubernetes repository
+      become: true
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /
+        mode: '0644'
+
+    - name: Install Containerd GPG key
+      become: true
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+          | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+    
+    - name: Configure Docker repository
+      become: true
+      copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: |
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable
+        mode: '0644'
+
+    - name: Refresh package index after adding Kubernetes repo
+      become: true
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Kubernetes components
+      become: true
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        install_recommends: no
+
+    - name: Install Containerd
+      become: true
+      apt:
+        update_cache: yes
+        name: containerd.io
+        state: present
+
+    # containerdの設定ファイルを編集する必要あり
+    # https://stackoverflow.com/questions/76041535/control-plane-pods-in-restart-loop-after-installation-with-kube-adm?utm_source=chatgpt.com
+    # [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+    #   SystemdCgroup = true
+    # sudo systemctl restart containerd
+    # 
+    - name: Regenerate default /etc/containerd/config.toml if it is missing
+      become: true
+      shell: |
+        containerd config default | tee /etc/containerd/config.toml > /dev/null
+
+    - name: Enable SystemdCgroup in containerd config
+      become: true
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: '^\s*SystemdCgroup\s*=\s*false'
+        replace: '  SystemdCgroup = true'
+
+    - name: Hold kubelet, kubeadm, kubectl to prevent automatic upgrade
+      become: true
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+    
+    - name: Enable containerd cri plugin
+      become: true
+      lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: '^\s*disabled_plugins\s*=\s*\["cri"\]'
+        line: '# disabled_plugins = ["cri"]'
+    
+    - name: Restart containerd service
+      become: true
+      service:
+        name: containerd
+        state: restarted
+        

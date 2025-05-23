@@ -1,0 +1,71 @@
+- name: Init kubeadm and setup Calico CNI
+  hosts: cp1
+  become: false
+  vars:
+    pod_network_cidr: 10.37.0.0/16
+    calico_manifest_url: https://raw.githubusercontent.com/projectcalico/calico/v3.28.1/manifests/calico.yaml
+    calico_manifest_path: /tmp/calico.yaml
+  tasks:
+    - name: set user and home variables
+      set_fact:
+        kube_user: "{{ ansible_user_id }}"
+        kube_home: "{{ ansible_env.HOME }}"
+
+    - name: Initialize Kubernetes control-plane (if not initialized)
+      become: true
+      ansible.builtin.shell: |
+        kubeadm init \
+          --pod-network-cidr={{ pod_network_cidr }} \
+          --cri-socket=unix:///run/containerd/containerd.sock
+      args:
+        creates: /etc/kubernetes/admin.conf
+      register: kubeadm_init
+      changed_when: kubeadm_init.rc == 0 and "'initializing the control-plane' in kubeadm_init.stdout"
+
+    - name: Ensure .kube directory exists for ubuntu user
+      become: true
+      file:
+        path: "{{ kube_home }}/.kube"
+        state: directory
+        owner: "{{ kube_user }}"
+        group: "{{ kube_user }}"
+        mode: '0700'
+
+    - name: Copy kubeconfig for ubuntu user
+      become: true
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ kube_home }}/.kube/config"
+        owner: "{{ kube_user }}"
+        group: "{{ kube_user }}"
+        mode: '0600'
+        remote_src: yes
+
+    - name: Download Calico manifest
+      become: true
+      get_url:
+        url: "{{ calico_manifest_url }}"
+        dest: "{{ calico_manifest_path }}"
+        mode: '0644'
+
+    - name: Set Calico pod network CIDR (uncomment and replace)
+      become: true
+      replace:
+        path: "{{ calico_manifest_path }}"
+        regexp: '# - name: CALICO_IPV4POOL_CIDR'
+        replace: '- name: CALICO_IPV4POOL_CIDR'
+      register: calico_uncomment
+
+    - name: Change default pod CIDR in Calico manifest
+      become: true      
+      replace:
+        path: "{{ calico_manifest_path }}"
+        regexp: '#   value: "192.168.0.0/16"'
+        replace: '  value: {{ pod_network_cidr }}'
+      when: calico_uncomment.changed
+
+    - name: Apply Calico manifest
+      environment:
+        KUBECONFIG: "{{ ansible_env.HOME }}/.kube/config"
+      command: kubectl apply -f "{{ calico_manifest_path }}"
+      # `kubectl apply` is idempotent for manifests
