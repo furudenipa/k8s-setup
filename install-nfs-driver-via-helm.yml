@@ -1,0 +1,34 @@
+- name : install nfs-subdir-external-provisioner via helm
+  hosts: cp1
+  vars:
+    nfs_server: "192.168.1.138"  # Set your NFS server IP or hostname here
+    nfs_path: "/srv/nfs_share"  # Set the NFS export path here
+  tasks:
+
+    # - name: install nfs-common
+    # sudo apt update
+    # sudo apt install -y nfs-common
+    # nfs-commonがないとPodを起動できない
+    # Podがスケジュールされる可能性のあるすべてのCPで必要な可能性がある
+
+    - name: add nfs-subdir-external-provisioner helm repository
+      command: |
+        helm repo add nfs-subdir-external-provisioner \
+          https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
+      args:
+        creates: /etc/helm/repositories/nfs-subdir-external-provisioner.yaml
+    - name: update helm repositories
+      command: helm repo update
+    
+    # tolerationsとnodeSelectorは、CPノードにPodをスケジュールするために必要
+    - name: install nfs-subdir-external-provisioner
+      command: |
+        helm upgrade --install nfs-provisioner \
+          nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
+          --namespace nfs-provisioner --create-namespace \
+          --set nfs.server="{{ nfs_server }}" \
+          --set nfs.path="{{ nfs_path }}" \
+          --set tolerations[0].key="node-role.kubernetes.io/control-plane" \
+          --set tolerations[0].operator="Equal" \
+          --set tolerations[0].effect="NoSchedule" \
+          --set nodeSelector."node-role\.kubernetes\.io/control-plane"="" 

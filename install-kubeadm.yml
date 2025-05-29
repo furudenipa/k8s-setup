@@ -1,5 +1,5 @@
 - name: kubeadm, kubelet, kubectl install
-  hosts: cp1
+  hosts: wk1
 
   tasks:
     - name: load kernel modules
@@ -85,6 +85,11 @@
       apt:
         update_cache: yes
         cache_valid_time: 3600
+
+    # apt updateがないとうまくいかない？
+
+    # TODO: nfs-commonをインストールする
+    # nfs-commonをインストールしないと、Volumeを確保できない
 
     - name: Install Kubernetes components
       become: true
